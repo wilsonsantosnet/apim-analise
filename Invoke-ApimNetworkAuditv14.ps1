@@ -5,7 +5,8 @@ Inventaria APIMs e verifica endpoints sem autenticacao (v12).
 .DESCRIPTION
 Usa a sessao Az.Accounts existente, sem alterar o contexto ou recursos.
 Requer leitura das subscriptions Azure, APIMs, service/tenant, namedValues, subnets,
-NSGs, service/subscriptions, service/apis, identityProviders e openidConnectProviders.
+NSGs, service/subscriptions, service/apis, identityProviders, openidConnectProviders
+e, com -CheckBackends, service/backends.
 Exporta JSON, CSV tecnico e resumo-endpoints.csv (separado por ponto e virgula).
 Mostra blocos por APIM com marcadores HTTP, DNS, TIMEOUT, TCP e TLS.
 Nao coleta tokens nem corpos HTTP.
@@ -26,6 +27,9 @@ Exporta apim-subscriptions.csv e apis-subscriptions.csv.
 Inventaria provedores de identidade e OpenID Connect somente por GET.
 Nao inspeciona clientSecret nem chama listSecrets; presenca/validade nao determinadas.
 Salva somente metadados selecionados dos provedores no JSON e inventory.csv.
+Com -CheckBackends, verifica indicios de chave nos backends cadastrados, sem avaliar policies.
+Sem -CheckBackends, nao consulta backends nem exibe seus blocos e contagens.
+Salva nomes, locais dos indicios e contagens, nunca valores das credenciais.
 A origem e considerada publica por padrao; use -PrivateOrigin em origem privada.
 Essa declaracao nao e uma verificacao independente da origem.
 Sondagens sequenciais, uma tentativa por etapa e sem seguir redirecionamentos.
@@ -55,6 +59,9 @@ Seleciona os primeiros encontrados, sem sorteio, e gera os relatorios normalment
 .PARAMETER CheckNsg
 Ativa a checagem opcional de subnets/NSGs dos APIMs Internal. Desligada por padrao.
 Requer leitura das subnets/NSGs. No modo Probe, apenas exibe/exporta dados salvos.
+.PARAMETER CheckBackends
+Ativa a checagem opcional de autenticacao por chave dos backends cadastrados.
+Desligada por padrao. No modo Probe, apenas exibe os resultados ja salvos.
 .PARAMETER TestUrls
 Ativa testes de URLs (DNS, TCP, TLS e HTTP), desligados por padrao.
 Sem este parametro, os CSVs de endpoints contem somente cabecalhos.
@@ -85,7 +92,8 @@ param(
     [ValidateRange(0, 2147483647)][int]$MaxInstances = 0,
     [switch]$CheckNsg,
     [switch]$TestUrls,
-    [ValidateNotNullOrEmpty()][ValidatePattern('\S')][string[]]$ApimNames = @()
+    [ValidateNotNullOrEmpty()][ValidatePattern('\S')][string[]]$ApimNames = @(),
+    [switch]$CheckBackends
 )
 
 $ErrorActionPreference = 'Stop'
@@ -94,7 +102,7 @@ $script:ApimApiVersion = '2024-05-01'
 $script:NetworkApiVersion = '2023-09-01'
 
 function Write-ApimAuditPlan {
-    param([string]$Mode, [int]$MaxInstances = 0, [switch]$CheckNsg, [switch]$TestUrls, [string[]]$ApimNames = @())
+    param([string]$Mode, [int]$MaxInstances = 0, [switch]$CheckNsg, [switch]$TestUrls, [string[]]$ApimNames = @(), [switch]$CheckBackends)
 
     Write-Host "`n$('=' * 76)" -ForegroundColor Cyan
     Write-Host ' APIM | VERIFICACOES DESTA EXECUCAO' -ForegroundColor White
@@ -135,6 +143,18 @@ function Write-ApimAuditPlan {
         Write-Host '     Configuracao da API; produtos abertos e policies nao avaliados.' -ForegroundColor Gray
         Write-Host ' [6] Inventariar Identity Providers e OpenID Connect, sem consultar segredos.' -ForegroundColor Gray
         Write-Host '     Client ID informado nao comprova client secret; presenca/validade nao determinadas.' -ForegroundColor Gray
+    }
+    if ($CheckBackends) {
+        if ($Mode -eq 'Probe') {
+            Write-Host ' [BACKENDS] Exibir somente as checagens existentes no inventario salvo.' -ForegroundColor Gray
+        }
+        else {
+            Write-Host ' [7] Verificar indicios de autenticacao por chave nos backends cadastrados.' -ForegroundColor Gray
+            Write-Host '     Sem avaliar policies, testar credenciais ou exibir valores de chaves.' -ForegroundColor Gray
+        }
+    }
+    else {
+        Write-Host ' [BACKENDS] Desativado. Para incluir a checagem, use -CheckBackends.' -ForegroundColor Gray
     }
     if (-not $TestUrls) {
         Write-Host ' [URL] Testes desativados por padrao: use -TestUrls para ativar DNS, TCP, TLS e HTTP.' -ForegroundColor Gray
@@ -641,6 +661,119 @@ function Get-ApimProviderCheck {
     [pscustomobject]$check
 }
 
+function Get-ApimBackendAuthCheck {
+    param([object]$Resource, [object]$Context, [int]$MaxRetries, [object]$Issues)
+
+    $check = [ordered]@{
+        CheckedUtc = [datetime]::UtcNow.ToString('o'); Result = 'Consultado'
+        KeyConfiguredCount = $null; NoKeyEvidenceCount = $null; UnknownCount = $null; TotalCount = $null
+        Backends = @()
+        Notes = 'Somente backends cadastrados: nomes conhecidos em credentials.header/query e query da URL. Nao avalia policies nem resolve pools/Named Values. Indicio nao comprova uso ou validade da chave.'
+        Error = $null
+    }
+    $failureReason = 'Falha ao consultar backends; detalhes da resposta omitidos para nao expor credenciais.'
+    try {
+        $page = Get-ApimArmCollection -Uri "$script:ArmBaseUri$($Resource.ResourceId)/backends?api-version=$script:ApimApiVersion" -Context $Context -MaxRetries $MaxRetries
+        if (-not $page.Complete) {
+            if ($page.Error -match '\bARM HTTP ([0-9]{3})\b') {
+                $failureReason = "Falha ao consultar backends (HTTP $($Matches[1])); detalhes da resposta omitidos."
+            }
+            throw $failureReason
+        }
+        $failureReason = 'Backend com metadados invalidos; contagens indisponiveis e detalhes omitidos para nao expor credenciais.'
+        $backends = [System.Collections.Generic.List[object]]::new()
+        $headerNames = @('api-key', 'x-api-key', 'ocp-apim-subscription-key', 'x-functions-key')
+        $queryNames = @('api-key', 'apikey', 'subscription-key', 'code', 'key')
+        foreach ($backend in $page.Items) {
+            $properties = $backend.properties
+            if ($backend.name -isnot [string] -or [string]::IsNullOrWhiteSpace($backend.name) -or
+                $properties -isnot [System.Collections.IDictionary]) {
+                throw $failureReason
+            }
+            $credentials = $properties.credentials
+            if ($null -ne $credentials -and $credentials -isnot [System.Collections.IDictionary]) {
+                throw $failureReason
+            }
+            $locations = [System.Collections.Generic.List[string]]::new()
+            $uncertain = $properties.type -eq 'Pool' -or $null -ne $credentials.authorization
+            foreach ($channel in @('header', 'query')) {
+                $parameters = $credentials.$channel
+                if ($null -eq $parameters) { continue }
+                if ($parameters -isnot [System.Collections.IDictionary]) { throw $failureReason }
+                $knownNames = if ($channel -eq 'header') { $headerNames } else { $queryNames }
+                foreach ($parameter in $parameters.Keys) {
+                    if ($parameter -notin $knownNames) { $uncertain = $true; continue }
+                    $values = @($parameters[$parameter])
+                    $invalid = @($values | Where-Object { $_ -isnot [string] }).Count -gt 0
+                    $populated = @($values | Where-Object { $_ -is [string] -and -not [string]::IsNullOrWhiteSpace($_) }).Count -gt 0
+                    if (-not $invalid -and $populated) {
+                        $locations.Add("$channel`: $($parameter.ToLowerInvariant())")
+                    }
+                    else { $uncertain = $true }
+                }
+            }
+            if ($null -ne $properties.url) {
+                $uri = $null
+                if ($properties.url -isnot [string] -or
+                    -not [uri]::TryCreate($properties.url, [System.UriKind]::Absolute, [ref]$uri)) {
+                    $uncertain = $true
+                }
+                else {
+                    foreach ($part in $uri.Query.TrimStart('?').Split('&', [System.StringSplitOptions]::RemoveEmptyEntries)) {
+                        $pair = $part.Split('=', 2)
+                        $parameter = [uri]::UnescapeDataString($pair[0].Replace('+', ' '))
+                        if ($parameter -notin $queryNames) { continue }
+                        if ($pair.Count -eq 2 -and -not [string]::IsNullOrWhiteSpace([uri]::UnescapeDataString($pair[1].Replace('+', ' ')))) {
+                            $locations.Add("URL query: $($parameter.ToLowerInvariant())")
+                        }
+                        else { $uncertain = $true }
+                    }
+                }
+            }
+            $status = if ($locations.Count -gt 0) { 'Indicio de chave' }
+                elseif ($uncertain) { 'Nao determinado' } else { 'Sem indicio no cadastro' }
+            $name = if ($properties.title -is [string] -and -not [string]::IsNullOrWhiteSpace($properties.title)) {
+                $properties.title
+            } else { $backend.name }
+            $backends.Add([pscustomobject]@{
+                BackendId = $backend.name; Name = $name; KeyAuthStatus = $status
+                KeyLocations = @($locations | Sort-Object -Unique)
+            })
+        }
+        $check.Backends = $backends.ToArray()
+        $check.KeyConfiguredCount = @($check.Backends | Where-Object KeyAuthStatus -eq 'Indicio de chave').Count
+        $check.NoKeyEvidenceCount = @($check.Backends | Where-Object KeyAuthStatus -eq 'Sem indicio no cadastro').Count
+        $check.UnknownCount = @($check.Backends | Where-Object KeyAuthStatus -eq 'Nao determinado').Count
+        $check.TotalCount = $backends.Count
+    }
+    catch {
+        $check.Result = 'Falha na consulta/classificacao de backends'
+        $check.Error = $failureReason
+        Add-ApimIssue $Issues $Resource.ResourceId 'BackendAuth' $check.Error
+    }
+    [pscustomobject]$check
+}
+
+function Write-ApimBackendAuthResult {
+    param([object]$Check)
+
+    Write-Host "`n [BACKENDS] INDICIOS DE AUTENTICACAO POR CHAVE" -ForegroundColor Cyan
+    if (-not $Check) {
+        Write-Host '       [SKIP] Inventario sem checagem de backends; execute Full/Inventory para coletar.' -ForegroundColor Yellow
+    }
+    elseif ($Check.Error) {
+        Write-Host "       $($Check.Result) | $($Check.Error)" -ForegroundColor Yellow
+    }
+    else {
+        Write-Host "       Com indicio de chave: $($Check.KeyConfiguredCount) | Sem indicio: $($Check.NoKeyEvidenceCount) | Indeterminados: $($Check.UnknownCount) | Total: $($Check.TotalCount)" -ForegroundColor Gray
+        foreach ($backend in $Check.Backends | Where-Object KeyAuthStatus -ne 'Sem indicio no cadastro') {
+            $detail = if ($backend.KeyLocations.Count -gt 0) { $backend.KeyLocations -join ', ' } else { 'mecanismo nao determinado' }
+            Write-Host "         [BACKEND] $($backend.Name) (ID: $($backend.BackendId)) | $($backend.KeyAuthStatus) | $detail" -ForegroundColor Gray
+        }
+        Write-Host '       Somente cadastro; policies, uso efetivo e validade das chaves nao avaliados.' -ForegroundColor Gray
+    }
+}
+
 function Write-ApimProviderResult {
     param([object]$Check, [string]$Title)
 
@@ -856,6 +989,7 @@ function ConvertTo-ApimInventoryRecord {
         NamedValueCheck = $null
         IdentityProviderCheck = $null
         OpenIdConnectProviderCheck = $null
+        BackendAuthCheck = $null
         SubscriptionCheck = $null
         ApiSubscriptionCheck = $null
         PrivateEndpoints = $privateEndpoints
@@ -873,7 +1007,8 @@ function Get-ApimInventory {
         [guid]$Tenant, [guid[]]$Subscriptions, [int]$MaxRetries, [object]$Issues,
         [ValidateRange(0, 2147483647)][int]$MaxInstances = 0,
         [switch]$CheckNsg,
-        [string[]]$ApimNames = @()
+        [string[]]$ApimNames = @(),
+        [switch]$CheckBackends
     )
 
     if (-not (Get-Command Invoke-AzRestMethod -ErrorAction SilentlyContinue)) {
@@ -959,6 +1094,13 @@ function Get-ApimInventory {
                 if ($record.IdentityProviderCheck.Error -or $record.OpenIdConnectProviderCheck.Error) {
                     $entry.InventoryStatus = 'PartialOrFailed'
                     if (-not $entry.Error) { $entry.Error = 'Falha na checagem de provedores; consulte issues.csv.' }
+                }
+                if ($CheckBackends) {
+                    $record.BackendAuthCheck = Get-ApimBackendAuthCheck -Resource $record -Context $context -MaxRetries $MaxRetries -Issues $Issues
+                    if ($record.BackendAuthCheck.Error) {
+                        $entry.InventoryStatus = 'PartialOrFailed'
+                        if (-not $entry.Error) { $entry.Error = 'Falha na checagem de backends; consulte issues.csv.' }
+                    }
                 }
                 $resources.Add($record)
                 $entry.ApimCount++
@@ -1341,6 +1483,11 @@ function Write-ApimAuditSummary {
     Write-ApimMetadataSummary -Resources @($Audit.Resources) -Title 'OPENID CONNECT' -CheckProperty 'OpenIdConnectProviderCheck' -CountLabels ([ordered]@{
         ProviderCount = 'Provedores'; SecretUnknownCount = 'Client secret indeterminado'
     })
+    if ($Audit.BackendCheckEnabled) {
+        Write-ApimMetadataSummary -Resources @($Audit.Resources) -Title 'BACKENDS' -CheckProperty 'BackendAuthCheck' -CountLabels ([ordered]@{
+            KeyConfiguredCount = 'Com indicio de chave'; NoKeyEvidenceCount = 'Sem indicio'; UnknownCount = 'Indeterminados'; TotalCount = 'Total'
+        })
+    }
     $requiredApims = @($Audit.Resources | Where-Object { $_.ApiSubscriptionCheck.RequiredCount -gt 0 }).Count
     $unknownApims = @($Audit.Resources | Where-Object {
         $check = $_.ApiSubscriptionCheck
@@ -1376,7 +1523,8 @@ function Invoke-ApimAudit {
         [ValidateRange(0, 2147483647)][int]$MaxInstances = 0,
         [switch]$CheckNsg,
         [switch]$TestUrls,
-        [ValidateNotNullOrEmpty()][ValidatePattern('\S')][string[]]$ApimNames = @()
+        [ValidateNotNullOrEmpty()][ValidatePattern('\S')][string[]]$ApimNames = @(),
+        [switch]$CheckBackends
     )
 
     if (($Mode -eq 'Probe') -ne [bool]$InventoryPath) {
@@ -1389,16 +1537,17 @@ function Invoke-ApimAudit {
     $declaredPublicOrigin = -not $PrivateOrigin
     $urlTestsEnabled = $Mode -ne 'Inventory' -and $TestUrls
     $urlSkipMessage = if (-not $TestUrls) { 'URLs nao testadas (padrao; use -TestUrls para ativar).' } else { 'Modo Inventory: URLs nao testadas.' }
-    Write-ApimAuditPlan -Mode $Mode -MaxInstances $MaxInstances -CheckNsg:$CheckNsg -TestUrls:$TestUrls -ApimNames $requestedApimNames
+    Write-ApimAuditPlan -Mode $Mode -MaxInstances $MaxInstances -CheckNsg:$CheckNsg -TestUrls:$TestUrls -ApimNames $requestedApimNames -CheckBackends:$CheckBackends
     $issues = [System.Collections.Generic.List[object]]::new()
     $results = [System.Collections.Generic.List[object]]::new()
     $endpointSummaries = [System.Collections.Generic.List[object]]::new()
     $audit = [ordered]@{
-        SchemaVersion = 1; ScriptVersion = '2.7.0'; TenantId = $TenantId.ToString()
+        SchemaVersion = 1; ScriptVersion = '2.8.0'; TenantId = $TenantId.ToString()
         Mode = $Mode; InventoryUtc = $null; ProbeUtc = $null
         MaxInstances = $MaxInstances
         ApimNames = $requestedApimNames
         NsgCheckEnabled = [bool]$CheckNsg
+        BackendCheckEnabled = [bool]$CheckBackends
         UrlTestsEnabled = $urlTestsEnabled
         PublicOriginDeclared = $declaredPublicOrigin
         Coverage = 'Somente subscriptions e recursos visiveis para a identidade. Nao comprova cobertura integral do tenant.'
@@ -1435,7 +1584,7 @@ function Invoke-ApimAudit {
         foreach ($issue in $inputAudit.Issues) { $issues.Add($issue) }
     }
     else {
-        $inventory = Get-ApimInventory -Tenant $TenantId -Subscriptions $SubscriptionIds -MaxRetries $ArmMaxRetries -Issues $issues -MaxInstances $MaxInstances -CheckNsg:$CheckNsg -ApimNames $requestedApimNames
+        $inventory = Get-ApimInventory -Tenant $TenantId -Subscriptions $SubscriptionIds -MaxRetries $ArmMaxRetries -Issues $issues -MaxInstances $MaxInstances -CheckNsg:$CheckNsg -ApimNames $requestedApimNames -CheckBackends:$CheckBackends
         $audit.InventoryUtc = [datetime]::UtcNow.ToString('o')
         $audit.Resources = @($inventory.Resources)
         $audit.Subscriptions = @($inventory.Subscriptions)
@@ -1472,6 +1621,9 @@ function Invoke-ApimAudit {
         Write-ApimSubscriptionResult -SubscriptionCheck $resource.SubscriptionCheck -ApiCheck $resource.ApiSubscriptionCheck
         Write-ApimProviderResult -Check $resource.IdentityProviderCheck -Title 'IDENTITY PROVIDERS'
         Write-ApimProviderResult -Check $resource.OpenIdConnectProviderCheck -Title 'OPENID CONNECT'
+        if ($CheckBackends) {
+            Write-ApimBackendAuthResult -Check $resource.BackendAuthCheck
+        }
         if (-not $urlTestsEnabled) {
             Write-Host "`n [URL] $urlSkipMessage" -ForegroundColor Gray
             Write-Host "$('=' * 76)" -ForegroundColor Cyan
@@ -1590,7 +1742,7 @@ function Invoke-ApimAudit {
     $directory = Join-Path $OutputDirectory $runName
     $null = New-Item -ItemType Directory -Path $directory -Force
     ConvertTo-Json -InputObject $audit -Depth 100 | Set-Content -LiteralPath (Join-Path $directory 'apim-audit.json') -Encoding utf8
-    $inventoryColumns = @('TenantId', 'SubscriptionId', 'SubscriptionName', 'ResourceGroup', 'Name', 'ResourceId', 'Location', 'Sku', 'ProvisioningState', 'VirtualNetworkType', 'PublicNetworkAccess', 'DeveloperPortalStatus', 'LegacyPortalStatus', 'DirectManagementApiEnabled', 'PrivateEndpoints', 'Hostnames', 'Targets', 'SubnetBindings', 'SubnetChecks', 'NamedValueCheck', 'SubscriptionCheck', 'ApiSubscriptionCheck', 'IdentityProviderCheck', 'OpenIdConnectProviderCheck')
+    $inventoryColumns = @('TenantId', 'SubscriptionId', 'SubscriptionName', 'ResourceGroup', 'Name', 'ResourceId', 'Location', 'Sku', 'ProvisioningState', 'VirtualNetworkType', 'PublicNetworkAccess', 'DeveloperPortalStatus', 'LegacyPortalStatus', 'DirectManagementApiEnabled', 'PrivateEndpoints', 'Hostnames', 'Targets', 'SubnetBindings', 'SubnetChecks', 'NamedValueCheck', 'SubscriptionCheck', 'ApiSubscriptionCheck', 'IdentityProviderCheck', 'OpenIdConnectProviderCheck', 'BackendAuthCheck')
     $resultColumns = @('TenantId', 'SubscriptionId', 'SubscriptionName', 'ResourceGroup', 'Name', 'ResourceId', 'Location', 'Sku', 'VirtualNetworkType', 'PublicNetworkAccess', 'EndpointType', 'Url', 'EndpointSource', 'ConfigurationStatus', 'ProbeUtc', 'PublicOriginDeclared', 'DnsStatus', 'Addresses', 'TcpStatus', 'ConnectedAddress', 'TcpAttemptErrors', 'TlsStatus', 'TlsProtocol', 'HttpStatusCode', 'RedirectLocation', 'ServerHeader', 'BackendAttribution', 'Conclusion', 'ErrorStage', 'Error')
     Export-ApimCsv -Data $audit.Resources -Columns $inventoryColumns -Path (Join-Path $directory 'inventory.csv')
     Export-ApimCsv -Data $audit.Results -Columns $resultColumns -Path (Join-Path $directory 'endpoints.csv')

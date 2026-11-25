@@ -3,7 +3,7 @@
 Script PowerShell para inventariar instancias do Azure API Management (APIM),
 consultar configuracoes e, opcionalmente, testar a acessibilidade de URLs.
 
-Arquivo utilizado nos exemplos: **`Invoke-ApimNetworkAuditv13.ps1`**.
+Arquivo utilizado nos exemplos: **`Invoke-ApimNetworkAuditv14.ps1`**.
 O script nao altera configuracoes do Azure, mas grava relatorios locais.
 Execute somente em recursos que voce tem autorizacao para consultar e testar.
 
@@ -16,6 +16,7 @@ Execute somente em recursos que voce tem autorizacao para consultar e testar.
 | Subscriptions APIM | Contagem da All-access padrao (`master`) e das demais subscriptions customizadas, incluindo todos os estados. |
 | APIs | Campo `subscriptionRequired`, contagens por API/revisao e nomes das APIs com exigencia confirmada de chave. |
 | Provedores de identidade | Inventario de Identity Providers e OpenID Connect, sem consultar valores de client secrets. |
+| Backends cadastrados | Opcionalmente, com `-CheckBackends`, indicios de autenticacao por chave na configuracao, sem salvar valores de credenciais nem analisar policies. |
 | URLs | DNS, TCP, TLS e HTTP GET para portais do desenvolvedor, portal legado e API direta de gerenciamento. |
 | NSGs | Opcionalmente, subnets e regras inbound dos APIMs `Internal`, incluindo regioes adicionais. |
 
@@ -34,7 +35,9 @@ rotas/operacoes individuais**.
 
 As leituras abrangem subscriptions Azure, APIMs, configuracao de gerenciamento
 direto, Named Values, subscriptions APIM, APIs, Identity Providers e OpenID
-Connect. Com `-CheckNsg`, tambem e necessaria leitura das subnets e NSGs.
+Connect. Com `-CheckBackends`, tambem e necessaria leitura dos backends cadastrados
+(`Microsoft.ApiManagement/service/backends/read`). Com `-CheckNsg`, e necessaria
+leitura das subnets e NSGs.
 Uma funcao como `Reader`, nos escopos autorizados, pode ser utilizada conforme
 as politicas de acesso da organizacao. Nao e necessario conceder escrita ou
 permissao para recuperar segredos.
@@ -52,12 +55,16 @@ Nomes como `apim-exemplo-a` tambem sao apenas exemplos.
 $TenantId = '<TENANT-ID>'
 Connect-AzAccount -Tenant $TenantId
 
-.\Invoke-ApimNetworkAuditv13.ps1 -TenantId $TenantId -MaxInstances 10 -SkipUrlTests
+.\Invoke-ApimNetworkAuditv14.ps1 -TenantId $TenantId -MaxInstances 10
 ```
 
 Esse comando analisa ate 10 APIMs acessiveis, sem testar URLs e sem consultar NSGs.
 Os blocos individuais mostram a assinatura, a instancia e os metadados coletados.
 O sumario final apresenta as contagens e a pasta dos relatorios.
+Por padrao, a origem e declarada publica e nenhum teste de URL e executado.
+Use `-TestUrls` para ativar os testes e `-PrivateOrigin` se houver conectividade
+privada. O script nao detecta a origem real da rede.
+A checagem de backends tambem fica desligada por padrao; ative com `-CheckBackends`.
 
 ## Parametros do script
 
@@ -69,14 +76,15 @@ O sumario final apresenta as contagens e a pasta dos relatorios.
 | `-MaxInstances` | Inteiro entre `0` e `2147483647` | Nao | `0` | Limita o total de APIMs analisados, depois dos filtros de assinaturas e nomes. `0` ou omissao significa todos. Seleciona pela ordem de descoberta, nao por sorteio nem pela ordem dos nomes informados. |
 | `-Mode` | `Full`, `Inventory` ou `Probe` | Nao | `Full` | Define se o script coleta metadados, testa URLs ou reutiliza um inventario anterior. Veja a tabela de modos abaixo. |
 | `-InventoryPath` | Caminho de arquivo JSON | Somente em `Probe` | Nenhum | Seleciona um `apim-audit.json` compativel, gerado anteriormente para o mesmo tenant. Obrigatorio em `Probe` e nao permitido nos demais modos. |
-| `-SkipUrlTests` | Switch | Nao | Desligado | Desativa todas as etapas DNS/TCP/TLS/HTTP. Preserva as consultas de configuracao e, se solicitado, NSG. Funciona tambem em `Probe` e nao muda o valor de `Mode`. |
+| `-TestUrls` | Switch | Nao | Desligado | Ativa DNS/TCP/TLS/HTTP em `Full` e `Probe`. Sem este parametro, somente inventario e checagens de configuracao sao executados. Nao muda `Mode`; `Inventory` nunca testa URLs. |
 | `-CheckNsg` | Switch | Nao | Desligado | Ativa a analise de subnets e NSGs somente de APIMs `Internal`. Em `Probe`, apenas exibe/exporta evidencias ja salvas; nao faz novas consultas. |
-| `-PublicOrigin` | Switch | Nao | Desligado | Declara que a origem das sondagens e publica, sem VPN/VNet ou conectividade privada. Nao detecta, altera nem garante essa condicao. Sem a declaracao, as sondagens continuam com um aviso. Sem sondagens, esse aviso nao aparece. |
+| `-CheckBackends` | Switch | Nao | Desligado | Ativa a checagem dos backends cadastrados e suas contagens por instancia e no sumario. Sem este parametro, nao consulta backends nem exibe seus resultados. Em `Probe`, apenas reutiliza dados salvos, sem consultar o Azure. |
+| `-PrivateOrigin` | Switch | Nao | Desligado (origem publica) | Declara origem privada, com VPN/VNet ou conectividade privada, em vez do padrao publico. Nao detecta, altera nem garante a rede real. |
 | `-OutputDirectory` | Caminho de pasta | Nao | Pasta `apim-audit` no diretorio atual | Define a pasta base dos relatorios. Cada execucao cria uma subpasta com data/hora UTC e identificador, sem substituir a execucao anterior. |
 | `-TimeoutSeconds` | Inteiro entre `1` e `120` | Nao | `15` | Timeout em segundos de cada etapa das sondagens de URLs. Nao e um timeout global da execucao nem das consultas ARM. |
 | `-ArmMaxRetries` | Inteiro entre `0` e `3` | Nao | `1` | Numero de tentativas adicionais das consultas ARM para respostas HTTP `429` e `5xx`. `0` desativa essas repeticoes. Nao repete as sondagens de URLs. |
 
-Switches nao precisam de valor: use, por exemplo, `-CheckNsg -SkipUrlTests`.
+Switches nao precisam de valor: use, por exemplo, `-CheckNsg -TestUrls`.
 Listas PowerShell podem ser informadas como `'apim-exemplo-a','apim-exemplo-b'` ou
 por uma variavel de array. Os exemplos sao para PowerShell, nao Bash.
 
@@ -84,9 +92,9 @@ por uma variavel de array. Os exemplos sao para PowerShell, nao Bash.
 
 | Modo | Configuracoes no Azure | URLs | Uso |
 | --- | --- | --- | --- |
-| `Full` | Consulta | Testa, salvo `-SkipUrlTests` | Inventario e sondagens na mesma execucao. |
+| `Full` | Consulta | Somente com `-TestUrls` | Inventario e, opcionalmente, sondagens na mesma execucao. |
 | `Inventory` | Consulta | Nao testa | Coleta configuracoes para analisar ou reutilizar depois. |
-| `Probe` | Nao consulta | Testa, salvo `-SkipUrlTests` | Reutiliza o JSON e executa as sondagens a partir da origem atual. |
+| `Probe` | Nao consulta | Somente com `-TestUrls` | Reutiliza o JSON e, opcionalmente, executa sondagens a partir da origem atual. |
 
 Em `Probe`, os timestamps e metadados de configuracao continuam sendo os do
 inventario original. Inventarios antigos sem determinadas checagens mostram
@@ -109,17 +117,26 @@ No modo `Probe`, `-ApimNames` e aplicado antes de `-MaxInstances`, dentro do arq
 
 Os exemplos abaixo usam `$TenantId` definido no inicio rapido.
 
+### Uma assinatura especifica
+
+Substitua os placeholders pelos GUIDs reais. O nome abaixo corresponde ao
+arquivo atual do script; ajuste-o se renomear o `.ps1`.
+
+```powershell
+.\Invoke-ApimNetworkAuditv14.ps1 -TenantId '<TENANT-ID>' -SubscriptionIds '<SUBSCRIPTION-ID>'
+```
+
 ### Uma ou mais assinaturas
 
 ```powershell
 $SubscriptionIds = @('<SUBSCRIPTION-ID-1>', '<SUBSCRIPTION-ID-2>')
-.\Invoke-ApimNetworkAuditv13.ps1 -TenantId $TenantId -SubscriptionIds $SubscriptionIds -Mode Inventory
+.\Invoke-ApimNetworkAuditv14.ps1 -TenantId $TenantId -SubscriptionIds $SubscriptionIds -Mode Inventory
 ```
 
 ### Instancias especificas, sem conhecer suas assinaturas
 
 ```powershell
-.\Invoke-ApimNetworkAuditv13.ps1 -TenantId $TenantId -ApimNames 'apim-exemplo-a','apim-exemplo-b' -SkipUrlTests
+.\Invoke-ApimNetworkAuditv14.ps1 -TenantId $TenantId -ApimNames 'apim-exemplo-a','apim-exemplo-b'
 ```
 
 O bloco de cada instancia e o `inventory.csv` mostram o nome e o ID da assinatura.
@@ -128,32 +145,32 @@ Para selecionar todas as instancias, omita `-ApimNames`; nao passe uma lista vaz
 ### Combinar nomes, assinatura, limite e NSG
 
 ```powershell
-.\Invoke-ApimNetworkAuditv13.ps1 -TenantId $TenantId -SubscriptionIds '<SUBSCRIPTION-ID-1>' -ApimNames 'apim-exemplo-a','apim-exemplo-b' -MaxInstances 2 -CheckNsg -SkipUrlTests
+.\Invoke-ApimNetworkAuditv14.ps1 -TenantId $TenantId -SubscriptionIds '<SUBSCRIPTION-ID-1>' -ApimNames 'apim-exemplo-a','apim-exemplo-b' -MaxInstances 2 -CheckNsg
 ```
 
 ### Testar URLs a partir de uma origem publica declarada
 
 ```powershell
-.\Invoke-ApimNetworkAuditv13.ps1 -TenantId $TenantId -MaxInstances 10 -PublicOrigin
+.\Invoke-ApimNetworkAuditv14.ps1 -TenantId $TenantId -MaxInstances 10 -TestUrls
 ```
 
-Use `-PublicOrigin` somente se a origem realmente nao tiver conectividade privada.
-O script nao verifica essa declaracao de forma independente.
+A origem e considerada publica por padrao. Acrescente `-PrivateOrigin` se houver
+VPN/VNet ou outra conectividade privada; a declaracao nao e verificada pelo script.
 
 ### Personalizar saida, timeout, repeticoes e diagnostico
 
 ```powershell
 $PastaSaida = Join-Path $PWD 'relatorios-apim'
-.\Invoke-ApimNetworkAuditv13.ps1 -TenantId $TenantId -MaxInstances 5 -OutputDirectory $PastaSaida -TimeoutSeconds 10 -ArmMaxRetries 2 -Verbose
+.\Invoke-ApimNetworkAuditv14.ps1 -TenantId $TenantId -MaxInstances 5 -OutputDirectory $PastaSaida -TimeoutSeconds 10 -ArmMaxRetries 2 -TestUrls -Verbose
 ```
 
 ### Coletar agora e testar o inventario depois
 
 ```powershell
-$resultado = .\Invoke-ApimNetworkAuditv13.ps1 -TenantId $TenantId -Mode Inventory -CheckNsg
+$resultado = .\Invoke-ApimNetworkAuditv14.ps1 -TenantId $TenantId -Mode Inventory -CheckNsg
 $Inventario = Join-Path $resultado.OutputDirectory 'apim-audit.json'
 
-.\Invoke-ApimNetworkAuditv13.ps1 -TenantId $TenantId -Mode Probe -InventoryPath $Inventario -ApimNames 'apim-exemplo-a' -MaxInstances 1 -PublicOrigin -CheckNsg
+.\Invoke-ApimNetworkAuditv14.ps1 -TenantId $TenantId -Mode Probe -InventoryPath $Inventario -ApimNames 'apim-exemplo-a' -MaxInstances 1 -TestUrls -CheckNsg
 ```
 
 Para executar a segunda etapa em outra sessao/maquina, copie o JSON, defina
@@ -163,7 +180,7 @@ Para executar a segunda etapa em outra sessao/maquina, copie o JSON, defina
 ### Consultar a ajuda do PowerShell
 
 ```powershell
-Get-Help .\Invoke-ApimNetworkAuditv13.ps1 -Full
+Get-Help .\Invoke-ApimNetworkAuditv14.ps1 -Full
 ```
 
 ## Parametros comuns do PowerShell
@@ -199,7 +216,7 @@ listar endpoints. Revisoes do mesmo ID base sao agrupadas nessa lista; APIs com
 IDs distintos permanecem separadas, mesmo com nomes de exibicao iguais.
 
 O sumario e compacto: rede, Named Values, subscriptions APIM, identidade, OpenID
-Connect, APIMs com exigencia de chave e, quando ativados, NSGs e URLs.
+Connect, APIMs com exigencia de chave e, quando ativados, backends, NSGs e URLs.
 
 | Indicacao | Significado |
 | --- | --- |
@@ -217,7 +234,7 @@ Cada execucao gera uma subpasta dentro de `-OutputDirectory`.
 | Arquivo | Conteudo |
 | --- | --- |
 | `apim-audit.json` | Inventario, configuracoes, resultados, cobertura, ocorrencias e opcoes da execucao; entrada do modo `Probe`. |
-| `inventory.csv` | Metadados dos APIMs e checagens. `IdentityProviderCheck` e `OpenIdConnectProviderCheck` contem JSON compacto com metadados selecionados. |
+| `inventory.csv` | Metadados dos APIMs e checagens. `IdentityProviderCheck`, `OpenIdConnectProviderCheck` e `BackendAuthCheck` contem JSON compacto com metadados selecionados. |
 | `resumo-endpoints.csv` | Resumo por URL, classificacao de acessibilidade e HTTP. |
 | `endpoints.csv` | Detalhes tecnicos das sondagens. |
 | `named-values.csv` | Contagens de Plain, Secret e Key Vault por instancia. |
@@ -231,7 +248,7 @@ Cada execucao gera uma subpasta dentro de `-OutputDirectory`.
 Os CSVs especializados de resumo de URLs, Named Values, subscriptions/APIs e NSGs
 usam `;`; os CSVs tecnicos de inventario, endpoints, cobertura e ocorrencias usam
 `,` como separador.
-Com `-SkipUrlTests` ou `-Mode Inventory`, os CSVs de endpoints possuem somente
+Sem `-TestUrls` ou com `-Mode Inventory`, os CSVs de endpoints possuem somente
 cabecalhos. Sem `-CheckNsg`, os CSVs de rede tambem possuem somente cabecalhos.
 Isso nao significa que nao existam endpoints ou NSGs.
 
@@ -239,7 +256,7 @@ O script tambem retorna um objeto PowerShell com a pasta e os caminhos dos
 relatorios, alem das contagens de APIMs, endpoints e ocorrencias. Por exemplo:
 
 ```powershell
-$resultado = .\Invoke-ApimNetworkAuditv13.ps1 -TenantId $TenantId -Mode Inventory -MaxInstances 1
+$resultado = .\Invoke-ApimNetworkAuditv14.ps1 -TenantId $TenantId -Mode Inventory -MaxInstances 1
 $resultado.OutputDirectory
 $resultado.ApimCount
 $resultado.IssueCount
@@ -257,6 +274,18 @@ $resultado.IssueCount
   Nao inspeciona `clientSecret` nem chama `listSecrets`. Presenca e validade do
   segredo permanecem `Nao determinado`; um client ID informado nao comprova que
   exista client secret.
+- **Backends:** desligado por padrao; com `-CheckBackends`, examina somente
+  entidades cadastradas em `service/backends`.
+  Reconhece headers `api-key`, `x-api-key`, `Ocp-Apim-Subscription-Key` e
+  `x-functions-key`; na query de credenciais ou da URL, reconhece `api-key`,
+  `apikey`, `subscription-key`, `code` e `key`. Um campo reconhecido preenchido,
+  inclusive com referencia a Named Value, gera **indicio de chave**, nao prova
+  de uso efetivo ou validade. Campos reconhecidos vazios, credenciais com nomes
+  desconhecidos, `authorization` e pools sem indicio direto ficam indeterminados.
+  Nao resolve Named Values, nao percorre pools e nao avalia policies. **Sem
+  indicio no cadastro nao significa backend sem autenticacao.** O GET pode
+  retornar credenciais; somente nomes, status e locais dos indicios sao retidos,
+  sem URLs de backend nem valores das credenciais nos relatorios.
 - **NSG:** apenas configuracao inbound de APIMs `Internal`. Nao comprova
   acessibilidade efetiva, nao combina Denies parciais e nao expande todas as
   service tags/ASGs, rotas ou regras administrativas. Um alerta representa uma
